@@ -3,5 +3,4 @@ flask
 flask-cors
 pandas
 scikit-learn
-gTTS
 gunicorn
