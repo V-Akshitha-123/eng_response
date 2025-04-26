@@ -1,27 +1,18 @@
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
-
 import pandas as pd
 from torch.utils.data import Dataset, DataLoader
-
+from flask import Flask, request, jsonify
 from sklearn.model_selection import train_test_split
-from flask import Flask ,request, jsonify,send_file,after_this_request
-from collections import Counter
-from flask_cors import CORS
-from gtts import gTTS
-
-import uuid
+import torch
 import os
-# Load Dataset
+
+PORT=7001
 url = f"https://drive.google.com/uc?id=1RCZShB5ohy1HdU-mogcP16TbeVv9txpY"
 df = pd.read_csv(url)
-df = df.dropna(subset=['query', 'response'])
 
-# Ensure all entries are strings
-df['query'] = df['query'].astype(str)
-df['response'] = df['response'].astype(str)
+
 # Tokenizer (Scratch)
 class ScratchTokenizer:
     def __init__(self):
@@ -50,7 +41,7 @@ train_data, test_data = train_test_split(df, test_size=0.2, random_state=42)
 
 # Initialize Tokenizer
 tokenizer = ScratchTokenizer()
-tokenizer.build_vocab(train_data["query"].tolist() + train_data["response"].tolist())
+tokenizer.build_vocab(train_data["instruction"].tolist() + train_data["response"].tolist())
 
 # Dataset Class
 class TextDataset(Dataset):
@@ -63,7 +54,7 @@ class TextDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        src_text = self.data.iloc[idx]["query"]
+        src_text = self.data.iloc[idx]["instruction"]
         tgt_text = self.data.iloc[idx]["response"]
         src = torch.tensor(self.tokenizer.encode(src_text), dtype=torch.long)
         tgt = torch.tensor(self.tokenizer.encode(tgt_text), dtype=torch.long)
@@ -94,6 +85,9 @@ class GPTModel(nn.Module):
 
         # Causal Mask for Auto-Regressive Decoding
         tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt.size(1)).to(tgt.device)
+
+        # Since we are using only the decoder now,
+        # we need to pass the source embeddings as memory.
         output = self.transformer(tgt_emb.permute(1, 0, 2), src_emb.permute(1, 0, 2), tgt_mask=tgt_mask)
         return self.fc_out(output.permute(1, 0, 2))
 
@@ -102,6 +96,17 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = GPTModel(tokenizer.vocab_size).to(device)
 optimizer = optim.AdamW(model.parameters(), lr=2e-4)
 criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+# Load the model
+def load_model(model, path="gpt_model.pth"):
+    if os.path.exists(path):
+        model.load_state_dict(torch.load(path, map_location=device))
+        model.to(device)
+        model.eval()
+        print("Model loaded successfully.")
+    else:
+        print("Model file not found!")
+
+load_model(model)
 
 # Training Function
 def train_epoch(model, loader, optimizer, criterion, device):
@@ -117,13 +122,7 @@ def train_epoch(model, loader, optimizer, criterion, device):
         total_loss += loss.item()
     return total_loss / len(loader)
 
-def load_model(model, path="gpt_model.pth"):
-    model.load_state_dict(torch.load(path, map_location=device,weights_only=True))
-    model.to(device)
-    model.eval()
-    print("Model loaded from", path)
 
-load_model(model)
 
 # Generate Response
 def generate_response(model, query, max_length=200):
@@ -139,54 +138,27 @@ def generate_response(model, query, max_length=200):
             break
 
     return tokenizer.decode(tgt.squeeze(0).tolist())
+print(set(df['intent']))
 
-app=Flask(__name__)
-CORS(app)
+# Test Query
+app = Flask(__name__)
 
-@app.route("/intent")
+@app.route("/")
 def home():
-    return jsonify({"intents" :list(set(df['intent'].dropna()))})
+    return "Transformer-based Response Generator API is running!"
 
 @app.route("/query", methods=["POST"])
 def query_model():
-    global audio_telugu_response
     data = request.get_json()
     query = data.get("query", "")
 
     if not query:
         return jsonify({"error": "Query cannot be empty"}), 400
 
-    # Assuming `generate_response` is a function that processes the query
     response = generate_response(model, query)
-    print(response)
-    
-    return jsonify({"telugu":(response)})
-@app.route("/audio", methods=["POST"])
-def get_audio():
-    data = request.get_json()
-    text = data.get("text")
+    return jsonify({"query": query, "response": response})
 
-    # text=audio_telugu_response
-    if not text:
-        return jsonify({"error": "No Response To convert to speech"}), 400
 
-    filename = f"speech_{uuid.uuid4().hex}.mp3"
-    filepath = os.path.join("audio_temp", filename)
 
-    os.makedirs("audio_temp", exist_ok=True)
-
-    # Convert text to Telugu speech
-    speech = gTTS(text=text, lang="en")
-    speech.save(filepath)
-
-    # Automatically delete the file after sending
-    @after_this_request
-    def cleanup(response):
-        try:
-            os.remove(filepath)
-        except Exception as e:
-            print(f"Cleanup error: {e}")
-        return response
-
-    return send_file(filepath, mimetype="audio/mpeg", as_attachment=False)
-
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=7001)
